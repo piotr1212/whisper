@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 import sys, os, fnmatch
 from subprocess import call
 from optparse import OptionParser

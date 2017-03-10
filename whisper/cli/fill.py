@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 # whisper-fill: unlike whisper-merge, don't overwrite data that's
 # already present in the target file, but instead, only add the missing
 # data (e.g. where the gaps in the target file are).  Because no values
