@@ -32,7 +32,7 @@ def walk_dir(base_dir, delete_corrupt=False, verbose=False):
                 print('%s: %d points' % (f, sum(i['points'] for i in info.get('archives', {}))))
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description=__doc__.strip())
     parser.add_argument('--delete-corrupt', default=False, action='store_true',
                         help='Delete reported files')
@@ -49,3 +49,7 @@ if __name__ == "__main__":
             parser.error("%d is not a directory!")
 
         walk_dir(d, delete_corrupt=args.delete_corrupt, verbose=args.verbose)
+
+
+if __name__ == "__main__":
+    main()
