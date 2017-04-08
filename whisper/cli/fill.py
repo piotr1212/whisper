@@ -117,12 +117,19 @@ def fill_archives(src, dst, startFrom):
         startFrom = fromTime
 
 
-def main():
+def create_parser():
         option_parser = optparse.OptionParser(
             usage='%prog [--lock] src dst',
             description='copies data from src in dst, if missing')
         option_parser.add_option('--lock', help='Lock whisper files',
                 default=False, action='store_true')
+
+        return option_parser
+
+
+def main():
+        option_parser = create_parser()
+
         (options, args) = option_parser.parse_args()
 
         if len(args) != 2:

@@ -12,82 +12,97 @@ if whisperResizeExecutable is None:
         # Probably will fail later, set it nevertheless
         whisperResizeExecutable = "whisper-resize.py"
 
-option_parser = OptionParser(
-    usage='''%prog storagePath configPath
+def create_parser():
+    option_parser = OptionParser(
+        usage='''%prog storagePath configPath
 
-storagePath   the Path to the directory containing whisper files (CAN NOT BE A SUBDIR, use --subdir for that)
-configPath    the path to your carbon config files
-''', version="%prog 0.1")
+    storagePath   the Path to the directory containing whisper files (CAN NOT BE A SUBDIR, use --subdir for that)
+    configPath    the path to your carbon config files
+    ''', version="%prog 0.1")
 
-option_parser.add_option(
-    '--doit', default=False, action='store_true',
-    help="This is not a drill, lets do it")
-option_parser.add_option(
-    '-q', '--quiet', default=False, action='store_true',
-    help="Display extra debugging info")
-option_parser.add_option(
-    '--subdir', default=None,
-    type='string', help="only process a subdir of whisper files")
-option_parser.add_option(
-    '--carbonlib', default=None,
-    type='string', help="folder where the carbon lib files are if its not in your path already")
-option_parser.add_option(
-    '--whisperlib', default=None,
-    type='string', help="folder where the whisper lib files are if its not in your path already")
-option_parser.add_option(
-    '--confirm', default=False, action='store_true',
-    help="ask for comfirmation prior to resizing a whisper file")
-option_parser.add_option(
-    '-x', '--extra_args', default='',
-    type='string', help="pass any additional arguments to the %s script" % basename(whisperResizeExecutable))
+    option_parser.add_option(
+        '--doit', default=False, action='store_true',
+        help="This is not a drill, lets do it")
+    option_parser.add_option(
+        '-q', '--quiet', default=False, action='store_true',
+        help="Display extra debugging info")
+    option_parser.add_option(
+        '--subdir', default=None,
+        type='string', help="only process a subdir of whisper files")
+    option_parser.add_option(
+        '--carbonlib', default=None,
+        type='string', help="folder where the carbon lib files are if its not in your path already")
+    option_parser.add_option(
+        '--whisperlib', default=None,
+        type='string', help="folder where the whisper lib files are if its not in your path already")
+    option_parser.add_option(
+        '--confirm', default=False, action='store_true',
+        help="ask for comfirmation prior to resizing a whisper file")
+    option_parser.add_option(
+        '-x', '--extra_args', default='',
+        type='string', help="pass any additional arguments to the %s script" % basename(whisperResizeExecutable))
 
-(options, args) = option_parser.parse_args()
+    return option_parser
 
-if len(args) < 2:
-    option_parser.print_help()
-    sys.exit(1)
+def main():
+    parser = create_parser()
 
-storagePath = args[0]
-configPath  = args[1]
+    (options, args) = parser.parse_args()
 
-#check to see if we are processing a subfolder
-# we need to have a separate config option for this since
-# otherwise the metric test thinks the metric is at the root
-# of the storage path and can match schemas incorrectly
-if options.subdir is None:
-    processPath = args[0]
-else:
-    processPath = options.subdir
+    if len(args) < 2:
+        parser.print_help()
+        sys.exit(1)
 
-# Injecting the Whisper Lib Path if needed
-if options.whisperlib is not None:
-    sys.path.insert(0, options.whisperlib)
+    storagePath = args[0]
+    configPath  = args[1]
 
-try:
-    import whisper
-except ImportError:
-    raise SystemExit('[ERROR] Can\'t find the whisper module, try using --whisperlib to explicitly include the path')
+    #check to see if we are processing a subfolder
+    # we need to have a separate config option for this since
+    # otherwise the metric test thinks the metric is at the root
+    # of the storage path and can match schemas incorrectly
+    if options.subdir is None:
+        processPath = args[0]
+    else:
+        processPath = options.subdir
 
-# Injecting the Carbon Lib Path if needed
-if options.carbonlib is not None:
-    sys.path.insert(0, options.carbonlib)
+    # Injecting the Whisper Lib Path if needed
+    if options.whisperlib is not None:
+        sys.path.insert(0, options.whisperlib)
 
-try:
-    from carbon import conf
-    from carbon.conf import settings
-except ImportError:
-    raise SystemExit('[ERROR] Can\'t find the carbon module, try using --carbonlib to explicitly include the path')
+    try:
+        import whisper
+    except ImportError:
+        raise SystemExit('[ERROR] Can\'t find the whisper module, try using --whisperlib to explicitly include the path')
 
-#carbon.conf not seeing the config files so give it a nudge
-settings.CONF_DIR = configPath
-settings.LOCAL_DATA_DIR = storagePath
+    # Injecting the Carbon Lib Path if needed
+    if options.carbonlib is not None:
+        sys.path.insert(0, options.carbonlib)
 
-# import these once we have the settings figured out
-from carbon.storage import loadStorageSchemas, loadAggregationSchemas
+    try:
+        from carbon import conf
+        from carbon.conf import settings
+    except ImportError:
+        raise SystemExit('[ERROR] Can\'t find the carbon module, try using --carbonlib to explicitly include the path')
 
-# Load the Defined Schemas from our config files
-schemas = loadStorageSchemas()
-agg_schemas = loadAggregationSchemas()
+    #carbon.conf not seeing the config files so give it a nudge
+    settings.CONF_DIR = configPath
+    settings.LOCAL_DATA_DIR = storagePath
+
+    # import these once we have the settings figured out
+    from carbon.storage import loadStorageSchemas, loadAggregationSchemas
+
+    # Load the Defined Schemas from our config files
+    schemas = loadStorageSchemas()
+    agg_schemas = loadAggregationSchemas()
+
+    if os.path.isfile(processPath) and processPath.endswith('.wsp'):
+        processMetric(processPath, schemas, agg_schemas)
+    else:
+        for root, _, files in os.walk(processPath):
+            # we only want to deal with non-hidden whisper files
+            for f in fnmatch.filter(files, '*.wsp'):
+                fullpath = os.path.join(root, f)
+                processMetric(fullpath, schemas, agg_schemas)
 
 # check to see if a metric needs to be resized based on the current config
 def processMetric(fullPath, schemas, agg_schemas):
@@ -210,11 +225,5 @@ def confirm(question, error_response='Valid options : yes or no'):
             return False
         print(error_response)
 
-if os.path.isfile(processPath) and processPath.endswith('.wsp'):
-    processMetric(processPath, schemas, agg_schemas)
-else:
-    for root, _, files in os.walk(processPath):
-        # we only want to deal with non-hidden whisper files
-        for f in fnmatch.filter(files, '*.wsp'):
-            fullpath = os.path.join(root, f)
-            processMetric(fullpath, schemas, agg_schemas)
+if __name__ == "__main__":
+    main()

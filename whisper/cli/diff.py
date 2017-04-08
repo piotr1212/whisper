@@ -8,33 +8,24 @@ try:
 except ImportError:
   raise SystemExit('[ERROR] Please make sure whisper is installed properly')
 
-option_parser = optparse.OptionParser(usage='''%prog [options] path_a path_b''')
-option_parser.add_option('--summary', default=False, action='store_true',
-                         help="show summary of differences")
-option_parser.add_option('--ignore-empty', default=False, action='store_true',
-                         help="skip comparison if either value is undefined")
-option_parser.add_option('--columns', default=False, action='store_true',
-                         help="print output in simple columns")
-option_parser.add_option('--no-headers', default=False, action='store_true',
-                         help="do not print column headers")
-option_parser.add_option('--until', default=None, type='int',
-                         help="Unix epoch time of the end of your requested interval (default: None)")
-option_parser.add_option('--json', default=False, action='store_true',
-                         help="Output results in JSON form")
+def create_parser():
+    option_parser = optparse.OptionParser(usage='''%prog [options] path_a path_b''')
+    option_parser.add_option('--summary', default=False, action='store_true',
+                             help="show summary of differences")
+    option_parser.add_option('--ignore-empty', default=False, action='store_true',
+                             help="skip comparison if either value is undefined")
+    option_parser.add_option('--columns', default=False, action='store_true',
+                             help="print output in simple columns")
+    option_parser.add_option('--no-headers', default=False, action='store_true',
+                             help="do not print column headers")
+    option_parser.add_option('--until', default=None, type='int',
+                             help="Unix epoch time of the end of your requested interval (default: None)")
+    option_parser.add_option('--json', default=False, action='store_true',
+                             help="Output results in JSON form")
 
-(options, args) = option_parser.parse_args()
+    return option_parser
 
-if len(args) != 2:
-  option_parser.print_help()
-  sys.exit(1)
 
-(path_a,path_b) = args[0::1]
-
-if options.until:
-  until_time = int( options.until )
-else:
-  until_time = None
-  
 def print_diffs(diffs,pretty=True,headers=True):
   if pretty:
     h = "%7s %11s %13s %13s\n"
@@ -85,6 +76,20 @@ def print_diffs_json(diffs,path_a,path_b):
                    sort_keys=True, indent=2, separators=(',', ' : '))
 
 def main():
+  option_parser = create_parser()
+  (options, args) = option_parser.parse_args()
+
+  if len(args) != 2:
+    option_parser.print_help()
+    sys.exit(1)
+
+  (path_a,path_b) = args[0::1]
+
+  if options.until:
+    until_time = int( options.until )
+  else:
+    until_time = None
+
   archive_diffs = whisper.diff(path_a,path_b,ignore_empty=options.ignore_empty,until_time=until_time)
   if options.summary:
     if options.json:

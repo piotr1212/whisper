@@ -16,23 +16,19 @@ if sys.version_info >= (3, 0):
 # Ignore SIGPIPE
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
-option_parser = optparse.OptionParser(usage='''%prog path''')
-(options, args) = option_parser.parse_args()
-
-if len(args) != 1:
-  option_parser.error("require one input file name")
-else:
-  path = args[0]
+def create_parser():
+    option_parser = optparse.OptionParser(usage='''%prog path''')
+    return option_parser
 
 def mmap_file(filename):
   fd = os.open(filename, os.O_RDONLY)
-  map = mmap.mmap(fd, os.fstat(fd).st_size, prot=mmap.PROT_READ)
+  fileMap = mmap.mmap(fd, os.fstat(fd).st_size, prot=mmap.PROT_READ)
   os.close(fd)
-  return map
+  return fileMap
 
-def read_header(map):
+def read_header(fileMap):
   try:
-    (aggregationType,maxRetention,xFilesFactor,archiveCount) = struct.unpack(whisper.metadataFormat,map[:whisper.metadataSize])
+    (aggregationType,maxRetention,xFilesFactor,archiveCount) = struct.unpack(whisper.metadataFormat,fileMap[:whisper.metadataSize])
   except:
     raise whisper.CorruptWhisperFile("Unable to unpack header")
 
@@ -41,7 +37,7 @@ def read_header(map):
 
   for i in xrange(archiveCount):
     try:
-      (offset, secondsPerPoint, points) = struct.unpack(whisper.archiveInfoFormat, map[archiveOffset:archiveOffset+whisper.archiveInfoSize])
+      (offset, secondsPerPoint, points) = struct.unpack(whisper.archiveInfoFormat, fileMap[archiveOffset:archiveOffset+whisper.archiveInfoSize])
     except:
       raise whisper.CorruptWhisperFile("Unable to read archive %d metadata" % i)
 
@@ -81,20 +77,32 @@ def dump_archive_headers(archives):
     print('  size: %d' % archive['size'])
     print("")
 
-def dump_archives(archives):
+def dump_archives(fileMap, archives):
   for i,archive in enumerate(archives):
     print('Archive %d data:' %i)
     offset = archive['offset']
     for point in xrange(archive['points']):
-      (timestamp, value) = struct.unpack(whisper.pointFormat, map[offset:offset+whisper.pointSize])
+      (timestamp, value) = struct.unpack(whisper.pointFormat, fileMap[offset:offset+whisper.pointSize])
       print('%d: %d, %10.35g' % (point, timestamp, value))
       offset += whisper.pointSize
     print
 
-if not os.path.exists(path):
-  raise SystemExit('[ERROR] File "%s" does not exist!' % path)
+def main():
+    option_parser = create_parser()
+    (options, args) = option_parser.parse_args()
 
-map = mmap_file(path)
-header = read_header(map)
-dump_header(header)
-dump_archives(header['archives'])
+    if len(args) != 1:
+      option_parser.error("require one input file name")
+    else:
+      path = args[0]
+
+    if not os.path.exists(path):
+      raise SystemExit('[ERROR] File "%s" does not exist!' % path)
+
+    fileMap = mmap_file(path)
+    header = read_header(fileMap)
+    dump_header(header)
+    dump_archives(fileMap, header['archives'])
+
+if __name__ == "__main__":
+    main()

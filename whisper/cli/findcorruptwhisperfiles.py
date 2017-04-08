@@ -30,8 +30,7 @@ def walk_dir(base_dir, delete_corrupt=False, verbose=False):
             if verbose:
                 print('%s: %d points' % (f, sum(i['points'] for i in info.get('archives', {}))))
 
-
-def main():
+def create_parser():
     parser = argparse.ArgumentParser(description=__doc__.strip())
     parser.add_argument('--delete-corrupt', default=False, action='store_true',
                         help='Delete reported files')
@@ -40,6 +39,13 @@ def main():
     parser.add_argument('directories', type=str, nargs='+',
                         metavar='WHISPER_DIR',
                         help='Directory containing Whisper files')
+
+    return parser
+
+
+def main():
+    parser = create_parser()
+
     args = parser.parse_args()
 
     for d in args.directories:
