@@ -42,30 +42,36 @@ class SimulatedCorruptWhisperFile(object):
         ...     whisper.info('test.wsp')
 
     When 'corrupt_archive' is passed as True, the metadata will be left
-    intact, but the archive will seem corrupted.
+    intact, but the archiveInfo will seem corrupted.
     """
-    def __init__(self, corrupt_archive=False):
-        self.corrupt_archive = corrupt_archive
+    def __init__(self, what='metadata'):
+        self.what = what
 
+        # save current settings
         self.metadataFormat = whisper.metadataFormat
         self.archiveInfoFormat = whisper.archiveInfoFormat
+        self.versionFormat = whisper.versionFormat
         self.CACHE_HEADERS = whisper.CACHE_HEADERS
-
-    def __enter__(self):
-        # Force the struct unpack to fail by changing the metadata
-        # format. This simulates an actual corrupted whisper file
-        if not self.corrupt_archive:
-            whisper.metadataFormat = '!ssss'
-        else:
-            whisper.archiveInfoFormat = '!ssss'
 
         # Force whisper to reread the header instead of returning
         # the previous (correct) header from the header cache
         whisper.CACHE_HEADERS = False
 
+    def __enter__(self):
+        # Force the struct unpack to fail by changing the metadata
+        # format. This simulates an actual corrupted whisper file
+        if self.what == 'metadata':
+            whisper.metadataFormat = '!ssss'
+        elif self.what == 'archive':
+            whisper.archiveInfoFormat = '!ssss'
+        elif self.what == 'version':
+            whisper.versionFormat = '!ssss'
+
     def __exit__(self, *args, **kwargs):
+        # restore old settings
         whisper.metadataFormat = self.metadataFormat
         whisper.archiveInfoFormat = self.archiveInfoFormat
+        whisper.versionFormat = self.versionFormat
         whisper.CACHE_HEADERS = self.CACHE_HEADERS
 
 
@@ -136,9 +142,12 @@ class WhisperTestBase(unittest.TestCase):
             pass
 
 
-class TestWhisper(WhisperTestBase):
+class TestWhisper:
     """
-    Testing functions for whisper.
+    Generic testing functions for whisper.
+
+    Tests are run from inherited classes: TestWhisperV1 and TestWhisperV2.
+
     """
     def test_validate_archive_list(self):
         """
@@ -282,29 +291,37 @@ class TestWhisper(WhisperTestBase):
         # Must not call os.unlink on exception other than IOError
         self.assertFalse(m_unlink.called)
 
-    def test_create_and_info(self):
-        """
-        Create a db and use info() to validate
-        """
+    def test_create_invalid_conf_exception(self):
         # check if invalid configuration fails successfully
         for retention in (0, []):
             with AssertRaisesException(
                     whisper.InvalidConfiguration(
                         'You must specify at least one archive configuration!')):
-                whisper.create(self.filename, retention)
+                self._create(self.filename, retention)
 
-        # create a new db with a valid configuration
-        whisper.create(self.filename, self.retention)
+        # check invalid versions
+        for version in [0, 1337, None, 'a']:
+            with AssertRaisesException(whisper.UnsupportedVersion()):
+                whisper.create(self.filename, self.retention, version=version)
 
         # Ensure another file can't be created when one exists already
+        self._create(self.filename, self.retention)
         with AssertRaisesException(
                 whisper.InvalidConfiguration(
                     'File {0} already exists!'.format(self.filename))):
-            whisper.create(self.filename, self.retention)
+            self._create(self.filename, self.retention)
+
+    def test_create_and_info(self):
+        """
+        Create a db and use info() to validate
+        """
+        # create a new db with a valid configuration
+        self._create(self.filename, self.retention)
 
         info = whisper.info(self.filename)
 
         # check header information
+        self.assertEqual(info['version'], self.version)
         self.assertEqual(info['maxRetention'],
                          max([a[0] * a[1] for a in self.retention]))
         self.assertEqual(info['aggregationMethod'], 'average')
@@ -324,7 +341,7 @@ class TestWhisper(WhisperTestBase):
         self.assertIsNone(whisper.info('bogus-file'))
 
         # Validate "corrupt" whisper metadata
-        whisper.create(self.filename, self.retention)
+        self._create(self.filename, self.retention)
         with SimulatedCorruptWhisperFile():
             with AssertRaisesException(
                     whisper.CorruptWhisperFile(
@@ -332,10 +349,57 @@ class TestWhisper(WhisperTestBase):
                 whisper.info(self.filename)
 
         # Validate "corrupt" whisper archive data
-        with SimulatedCorruptWhisperFile(corrupt_archive=True):
+        with SimulatedCorruptWhisperFile(what='archive'):
             with AssertRaisesException(
                     whisper.CorruptWhisperFile(
                         'Unable to read archive0 metadata', self.filename)):
+                whisper.info(self.filename)
+
+        # Validate "corrupt" whisper version info
+        with SimulatedCorruptWhisperFile(what='version'):
+            with AssertRaisesException(
+                    whisper.CorruptWhisperFile(
+                        'Unable to read version info', self.filename)):
+                whisper.info(self.filename)
+
+        # Invalid chars in version
+        with open(self.filename, 'wb') as fh:
+            fh.write(struct.pack('!12s', b'WHISPER000A\n'))
+            fh.flush()
+            with AssertRaisesException(
+                    whisper.CorruptWhisperFile(
+                        'Unable to read version info', self.filename)):
+                whisper.info(self.filename)
+
+        # unsupported version
+        with open(self.filename, 'wb') as fh:
+            fh.write(struct.pack('!12s', b'WHISPER1337\n'))
+            fh.flush()
+            with AssertRaisesException(whisper.UnsupportedVersion()):
+                whisper.info(self.filename)
+
+        # unsupported aggregationType
+        with open(self.filename, 'wb') as fh:
+            fh.seek(0)
+            fh.write(struct.pack('!12sL12s', b'WHISPER0001\n', 1337,
+                                 b'123456789012'))
+            fh.flush()
+            with AssertRaisesException(
+                    whisper.CorruptWhisperFile(
+                        "Unable to read header (invalid aggregationType)",
+                        self.filename)):
+                whisper.info(self.filename)
+
+        # unsupported aggregationType
+        with open(self.filename, 'wb') as fh:
+            fh.seek(0)
+            fh.write(struct.pack('!12s2Lf4s', b'WHISPER0001\n', 1, 1, 2.0,
+                                 b'1234'))
+            fh.flush()
+            with AssertRaisesException(
+                    whisper.CorruptWhisperFile(
+                        "Unable to read header (invalid xff)",
+                        self.filename)):
                 whisper.info(self.filename)
 
     def test_file_fetch_edge_cases(self):
@@ -343,7 +407,7 @@ class TestWhisper(WhisperTestBase):
         Test some of the edge cases in file_fetch() that should return
         None or raise an exception
         """
-        whisper.create(self.filename, [(1, 60)])
+        self._create(self.filename, [(1, 60)])
 
         with open(self.filename, 'rb') as fh:
             msg = "Invalid time interval: from time '{0}' is after until time '{1}'"
@@ -395,9 +459,9 @@ class TestWhisper(WhisperTestBase):
 
         # create two empty databases with same retention
         self.addCleanup(self._remove, testdb_a)
-        whisper.create(testdb_a, self.retention)
+        self._create(testdb_a, self.retention)
         self.addCleanup(self._remove, testdb_b)
-        whisper.create(testdb_b, self.retention)
+        self._create(testdb_b, self.retention)
 
         whisper.merge(testdb_a, testdb_b)
 
@@ -408,7 +472,7 @@ class TestWhisper(WhisperTestBase):
         self._update()
 
         self.addCleanup(self._remove, testdb)
-        whisper.create(testdb, [(100, 1)])
+        self._create(testdb, [(100, 1)])
 
         with AssertRaisesException(
                 NotImplementedError(
@@ -422,9 +486,9 @@ class TestWhisper(WhisperTestBase):
         now = int(time.time())
 
         self.addCleanup(self._remove, testdb)
-        whisper.create(testdb, self.retention)
+        self._create(testdb, self.retention)
 
-        whisper.create(self.filename, self.retention)
+        self._create(self.filename, self.retention)
 
         whisper.update(testdb, 1.0, now)
         whisper.update(self.filename, 2.0, now)
@@ -441,9 +505,9 @@ class TestWhisper(WhisperTestBase):
         now = time.time()
 
         self.addCleanup(self._remove, testdb)
-        whisper.create(testdb, self.retention)
+        self._create(testdb, self.retention)
 
-        whisper.create(self.filename, self.retention)
+        self._create(self.filename, self.retention)
 
         whisper.update(testdb, 1.0, now)
         whisper.update(self.filename, 2.0, now)
@@ -482,9 +546,9 @@ class TestWhisper(WhisperTestBase):
         now = time.time()
 
         self.addCleanup(self._remove, testdb)
-        whisper.create(testdb, self.retention)
+        self._create(testdb, self.retention)
 
-        whisper.create(self.filename, self.retention)
+        self._create(self.filename, self.retention)
 
         whisper.update(testdb, 1.0, now)
         whisper.update(self.filename, 2.0, now)
@@ -502,9 +566,9 @@ class TestWhisper(WhisperTestBase):
         testdb = "test-%s" % self.filename
 
         self.addCleanup(self._remove, testdb)
-        whisper.create(testdb, [(120, 10)])
+        self._create(testdb, [(120, 10)])
 
-        whisper.create(self.filename, self.retention)
+        self._create(self.filename, self.retention)
 
         # Merging 2 archives with different retentions should fail
         with open(testdb, 'rb') as fh_1:
@@ -529,7 +593,7 @@ class TestWhisper(WhisperTestBase):
 
         # SECOND MINUTE HOUR DAY
         retention = [(1, 60), (60, 60), (3600, 24), (86400, 365)]
-        whisper.create(self.filename, retention)
+        self._create(self.filename, retention)
 
         # check a db with an invalid time range
         now = int(time.time())
@@ -559,7 +623,7 @@ class TestWhisper(WhisperTestBase):
 
         # create sample data
         self.addCleanup(self._remove, wsp)
-        whisper.create(wsp, schema, sparse=sparse, useFallocate=useFallocate)
+        self._create(wsp, schema, sparse=sparse, useFallocate=useFallocate)
         tn = int(time.time()) - num_data_points
 
         data = []
@@ -573,6 +637,11 @@ class TestWhisper(WhisperTestBase):
         whisper.update_many(wsp, data[1:])
 
         return data
+
+    def _create(self, *args, **kwargs):
+        if 'version' not in kwargs:
+            kwargs['version'] = self.version
+        whisper.create(*args, **kwargs)
 
     def test_fadvise(self):
         original_fadvise = whisper.FADVISE_RANDOM
@@ -604,6 +673,11 @@ class TestWhisper(WhisperTestBase):
     def test_sparse(self):
         self._update(sparse=True)
 
+    def test_update_large(self):
+        """ Test a bit larger file with multiple archives """
+        self._update(schema=[(1, 18000), (10, 86400), (60, 20160),
+                             (300, 8064), (1800, 17520), (7200, 43000)])
+
     def test_set_xfilesfactor(self):
         """
         Create a whisper file
@@ -611,7 +685,7 @@ class TestWhisper(WhisperTestBase):
         Check if update succeeded
         Check if exceptions get raised with wrong input
         """
-        whisper.create(self.filename, [(1, 20)])
+        self._create(self.filename, [(1, 20)])
 
         target_xff = 0.42
         info0 = whisper.info(self.filename)
@@ -685,7 +759,7 @@ class TestWhisper(WhisperTestBase):
         self.addCleanup(self._remove, wsp)
         archive_len = 3
         archive_step = 1
-        whisper.create(wsp, [(archive_step, archive_len)])
+        self._create(wsp, [(archive_step, archive_len)])
 
         # given too many points than the db can hold
         excess_len = 1
@@ -741,7 +815,7 @@ class TestWhisper(WhisperTestBase):
         whisper.AUTOFLUSH = True
         whisper.CACHE_HEADERS = True
         # create a new db with a valid configuration
-        whisper.create(self.filename, self.retention)
+        self._create(self.filename, self.retention)
 
         with AssertRaisesException(
                 whisper.InvalidAggregationMethod(
@@ -798,7 +872,7 @@ class TestWhisper(WhisperTestBase):
 
         # SECOND MINUTE HOUR DAY
         retention = [(1, 60), (60, 60), (3600, 24), (86400, 365)]
-        whisper.create(self.filename, retention)
+        self._create(self.filename, retention)
 
         archives = ["1s", "1m", "1h", "1d"]
 
@@ -810,6 +884,18 @@ class TestWhisper(WhisperTestBase):
             self.assertEqual(fetch[0][1] - fetch[0][0], retention[-1][0] * retention[-1][1])
         with AssertRaisesException(ValueError("Invalid granularity: 2")):
             fetch = whisper.fetch(self.filename, 0, archiveToSelect="2s")
+
+
+class TestWhisperV1(TestWhisper, WhisperTestBase):
+    def setUp(self):
+        self.version = 1
+        super(TestWhisperV1, self).setUp()
+
+
+class TestWhisperV2(TestWhisper, WhisperTestBase):
+    def setUp(self):
+        self.version = 2
+        super(TestWhisperV2, self).setUp()
 
 
 class TestgetUnitString(unittest.TestCase):

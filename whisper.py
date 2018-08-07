@@ -19,7 +19,9 @@
 #
 # File = Header,Data
 #   Header = Metadata,ArchiveInfo+
-#       Metadata = aggregationType,maxRetention,xFilesFactor,archiveCount
+#       Metadata = Magic,Version,aggregationType,maxRetention,xFilesFactor,archiveCount
+#       Magic = "WHISPER"
+#       Version = "0002\n"
 #       ArchiveInfo = Offset,SecondsPerPoint,Points
 #   Data = Archive+
 #       Archive = Point+
@@ -94,6 +96,7 @@ if CAN_FALLOCATE:
   del libc
   del libc_name
 
+VERSION = 2
 LOCK = False
 CACHE_HEADERS = False
 AUTOFLUSH = False
@@ -115,6 +118,8 @@ metadataFormat = "!2LfL"
 metadataSize = struct.calcsize(metadataFormat)
 archiveInfoFormat = "!3L"
 archiveInfoSize = struct.calcsize(archiveInfoFormat)
+versionFormat = '!7s5s'
+versionSize = struct.calcsize(versionFormat)
 
 aggregationTypeToMethod = dict({
   1: 'average',
@@ -207,6 +212,11 @@ class TimestampNotCovered(WhisperException):
   """Timestamp not covered by any archives in this database."""
 
 
+class UnsupportedVersion(WhisperException):
+
+  """ Whisper file format version not supported """
+
+
 class CorruptWhisperFile(WhisperException):
 
   def __init__(self, error, path):
@@ -280,6 +290,24 @@ def __readHeader(fh):
 
   originalOffset = fh.tell()
   fh.seek(0)
+  packedVersion = fh.read(versionSize)
+
+  try:
+    (magic, version) = struct.unpack(versionFormat, packedVersion)
+  except (struct.error):
+    raise CorruptWhisperFile("Unable to read version info", fh.name)
+
+  if magic == b'WHISPER':
+    try:
+      version = int(version)
+    except ValueError:
+      raise CorruptWhisperFile("Unable to read version info", fh.name)
+    if version > VERSION:
+      raise UnsupportedVersion()
+  else:
+    version = 1
+    fh.seek(0)
+
   packedMetadata = fh.read(metadataSize)
 
   try:
@@ -291,10 +319,11 @@ def __readHeader(fh):
   try:
     aggregationTypeToMethod[aggregationType]
   except KeyError:
-    raise CorruptWhisperFile("Unable to read header", fh.name)
+    raise CorruptWhisperFile(
+      "Unable to read header (invalid aggregationType)", fh.name)
 
   if not 0 <= xff <= 1:
-    raise CorruptWhisperFile("Unable to read header", fh.name)
+    raise CorruptWhisperFile("Unable to read header (invalid xff)", fh.name)
 
   archives = []
 
@@ -316,6 +345,7 @@ def __readHeader(fh):
 
   fh.seek(originalOffset)
   info = {
+    'version': version,
     'aggregationMethod': aggregationTypeToMethod.get(aggregationType, 'average'),
     'maxRetention': maxRetention,
     'xFilesFactor': xff,
@@ -375,7 +405,8 @@ def __setAggregation(path, aggregationMethod=None, xFilesFactor=None):
       aggregationMethod = info['aggregationMethod']
 
     __writeHeaderMetadata(fh, aggregationMethod, info['maxRetention'],
-                          xFilesFactor, len(info['archives']))
+                          xFilesFactor, len(info['archives']),
+                          version=info['version'])
 
     if AUTOFLUSH:
       fh.flush()
@@ -387,7 +418,8 @@ def __setAggregation(path, aggregationMethod=None, xFilesFactor=None):
   return (info['aggregationMethod'], info['xFilesFactor'])
 
 
-def __writeHeaderMetadata(fh, aggregationMethod, maxRetention, xFilesFactor, archiveCount):
+def __writeHeaderMetadata(fh, aggregationMethod, maxRetention, xFilesFactor,
+                          archiveCount, version):
   """ Writes header metadata to fh """
 
   try:
@@ -406,12 +438,15 @@ def __writeHeaderMetadata(fh, aggregationMethod, maxRetention, xFilesFactor, arc
     raise InvalidXFilesFactor("Invalid xFilesFactor %s, not between 0 and 1" %
                               xFilesFactor)
 
-  aggregationType = struct.pack(longFormat, aggregationType)
-  maxRetention = struct.pack(longFormat, maxRetention)
-  xFilesFactor = struct.pack(floatFormat, xFilesFactor)
-  archiveCount = struct.pack(longFormat, archiveCount)
+  metadata = (aggregationType, maxRetention, xFilesFactor, archiveCount)
 
-  packedMetadata = aggregationType + maxRetention + xFilesFactor + archiveCount
+  if version > 1:
+    magic = b'WHISPER'
+    version = '{:04d}\n'.format(version).encode('ascii')
+    packedMetadata = struct.pack(versionFormat + metadataFormat[1:], magic,
+                                 version, *metadata)
+  else:
+    packedMetadata = struct.pack(metadataFormat, *metadata)
 
   fh.seek(0)
   fh.write(packedMetadata)
@@ -476,8 +511,8 @@ def validateArchiveList(archiveList):
 
 
 def create(path, archiveList, xFilesFactor=None, aggregationMethod=None,
-           sparse=False, useFallocate=False):
-  """create(path,archiveList,xFilesFactor=0.5,aggregationMethod='average')
+           sparse=False, useFallocate=False, version=VERSION):
+  """ Create a new Whisper file
 
   path               is a string
   archiveList        is a list of archives, each of which is of the form
@@ -486,6 +521,9 @@ def create(path, archiveList, xFilesFactor=None, aggregationMethod=None,
                      that must have known values for a propagation to occur
   aggregationMethod  specifies the function to use when propagating data (see
                      ``whisper.aggregationMethods``)
+  sparse             create a sparse file (don't allocate empty data)
+  useFallocate       creates the file faster (Linux only)
+  version            create Whisper file of specified version
   """
   # Set default params
   if xFilesFactor is None:
@@ -495,6 +533,15 @@ def create(path, archiveList, xFilesFactor=None, aggregationMethod=None,
 
   # Validate archive configurations...
   validateArchiveList(archiveList)
+
+  # validate version
+  try:
+    version = int(version)
+  except (TypeError, ValueError):
+    raise UnsupportedVersion()
+
+  if version < 1 or version > VERSION:
+    raise UnsupportedVersion()
 
   # Looks good, now we create the file and write the header
   if os.path.exists(path):
@@ -510,9 +557,11 @@ def create(path, archiveList, xFilesFactor=None, aggregationMethod=None,
       oldest = max([secondsPerPoint * points for secondsPerPoint, points in archiveList])
 
       __writeHeaderMetadata(fh, aggregationMethod, oldest, xFilesFactor,
-                            len(archiveList))
+                            len(archiveList), version)
 
       headerSize = metadataSize + (archiveInfoSize * len(archiveList))
+      if version > 1:
+        headerSize += versionSize
       archiveOffsetPointer = headerSize
 
       for secondsPerPoint, points in archiveList:
