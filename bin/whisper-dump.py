@@ -43,13 +43,30 @@ def mmap_file(filename):
 
 def read_header(map):
   try:
+    (magic, version) = struct.unpack(whisper.versionFormat, map[:whisper.versionSize])
+  except (struct.error):
+    raise whisper.CorruptWhisperFile("Unable to unpack header")
+
+  if magic == b'WHISPER':
+    try:
+      version = int(version)
+    except (struct.error):
+      raise whisper.CorruptWhisperFile("Unable to unpack header")
+    metadataStart = whisper.versionSize
+    metadataEnd = whisper.versionSize + whisper.metadataSize
+  else:
+    version = 1
+    metadataStart = 0
+    metadataEnd = whisper.metadataSize
+
+  try:
     (aggregationType, maxRetention, xFilesFactor, archiveCount) \
-      = struct.unpack(whisper.metadataFormat, map[:whisper.metadataSize])
+        = struct.unpack(whisper.metadataFormat, map[metadataStart:metadataEnd])
   except (struct.error, ValueError, TypeError):
     raise whisper.CorruptWhisperFile("Unable to unpack header")
 
   archives = []
-  archiveOffset = whisper.metadataSize
+  archiveOffset = metadataEnd
 
   for i in xrange(archiveCount):
     try:
@@ -71,6 +88,7 @@ def read_header(map):
     archiveOffset += whisper.archiveInfoSize
 
   header = {
+    'version': version,
     'aggregationMethod': whisper.aggregationTypeToMethod.get(aggregationType, 'average'),
     'maxRetention': maxRetention,
     'xFilesFactor': xFilesFactor,
@@ -81,6 +99,7 @@ def read_header(map):
 
 def dump_header(header):
   print('Meta data:')
+  print('  version: %s' % header['version'])
   print('  aggregation method: %s' % header['aggregationMethod'])
   print('  max retention: %d' % header['maxRetention'])
   print('  xFilesFactor: %g' % header['xFilesFactor'])
