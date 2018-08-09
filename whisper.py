@@ -643,13 +643,13 @@ def __propagate(fh, header, timestamp, higher, lower):
   lowerIntervalStart = timestamp - (timestamp % lower['secondsPerPoint'])
 
   if header['version'] > 1:
-    lowerIntervalEnd = lowerIntervalStart + higher['secondsPerPoint']
+    lowerIntervalEnd = lowerIntervalStart + lower['secondsPerPoint']
     higherFirstOffset = _calculateOffset(lowerIntervalStart, higher)
     higherLastOffset = _calculateOffset(lowerIntervalEnd, higher)
   else:
     fh.seek(higher['offset'])
     packedPoint = fh.read(pointSize)
-    (higherBaseInterval, higherBaseValue) = struct.unpack(pointFormat, packedPoint)
+    (higherBaseInterval, _) = struct.unpack(pointFormat, packedPoint)
 
     if higherBaseInterval == 0:
       higherFirstOffset = higher['offset']
@@ -701,20 +701,24 @@ def __propagate(fh, header, timestamp, higher, lower):
   if knownPercent >= xff:  # We have enough data to propagate a value!
     aggregateValue = aggregate(aggregationMethod, knownValues, neighborValues)
     myPackedPoint = struct.pack(pointFormat, lowerIntervalStart, aggregateValue)
-    fh.seek(lower['offset'])
-    packedPoint = fh.read(pointSize)
-    (lowerBaseInterval, lowerBaseValue) = struct.unpack(pointFormat, packedPoint)
 
-    if lowerBaseInterval == 0:  # First propagated update to this lower archive
+    if header['version'] > 1:
+      myOffset = _calculateOffset(lowerIntervalStart, lower)
+    else:
       fh.seek(lower['offset'])
-      fh.write(myPackedPoint)
-    else:  # Not our first propagated update to this lower archive
-      timeDistance = lowerIntervalStart - lowerBaseInterval
-      pointDistance = timeDistance // lower['secondsPerPoint']
-      byteDistance = pointDistance * pointSize
-      lowerOffset = lower['offset'] + (byteDistance % lower['size'])
-      fh.seek(lowerOffset)
-      fh.write(myPackedPoint)
+      packedPoint = fh.read(pointSize)
+      (lowerBaseInterval, _) = struct.unpack(pointFormat, packedPoint)
+
+      if lowerBaseInterval == 0:  # First propagated update to this lower archive
+        myOffset = lower['offset']
+      else:  # Not our first propagated update to this lower archive
+        timeDistance = lowerIntervalStart - lowerBaseInterval
+        pointDistance = timeDistance // lower['secondsPerPoint']
+        byteDistance = pointDistance * pointSize
+        myOffset = lower['offset'] + (byteDistance % lower['size'])
+
+    fh.seek(myOffset)
+    fh.write(myPackedPoint)
 
     return True
 
@@ -769,7 +773,7 @@ def file_update(fh, value, timestamp, now=None):
   else:
     fh.seek(archive['offset'])
     packedPoint = fh.read(pointSize)
-    (baseInterval, baseValue) = struct.unpack(pointFormat, packedPoint)
+    (baseInterval, _) = struct.unpack(pointFormat, packedPoint)
 
     if baseInterval == 0:  # This file's first update
       myOffset = archive['offset']
@@ -882,9 +886,10 @@ def __archive_update_many(fh, header, archive, points):
     # Read base point and determine where our writes will start
     fh.seek(archive['offset'])
     packedBasePoint = fh.read(pointSize)
-    (baseInterval, baseValue) = struct.unpack(pointFormat, packedBasePoint)
+    (baseInterval, _) = struct.unpack(pointFormat, packedBasePoint)
     if baseInterval == 0:  # This file's first update
-      baseInterval = packedStrings[0][0]  # Use our first string as the base, so we start at the start
+      # Use our first string as the base, so we start at the start
+      baseInterval = packedStrings[0][0]
 
   # Write all of our packed strings in locations determined by the baseInterval
   for (interval, packedString) in packedStrings:
@@ -1038,7 +1043,7 @@ archive on a read and request data older than the archive's retention
   else:
     fh.seek(archive['offset'])
     packedPoint = fh.read(pointSize)
-    (baseInterval, baseValue) = struct.unpack(pointFormat, packedPoint)
+    (baseInterval, _) = struct.unpack(pointFormat, packedPoint)
 
     if baseInterval == 0:
       points = (untilInterval - fromInterval) // step

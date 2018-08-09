@@ -753,6 +753,52 @@ class TestWhisper:
 
         whisper.LOCK = original_lock
 
+    def test_update_multi_archives(self):
+        """
+        Update multi layer archive and verify data
+        """
+        self._create(self.filename, [(1, 20), (5, 20), (10, 20)])
+        for i in range(10, 30):
+            whisper.update(self.filename, i, timestamp=i, now=30)
+
+        # check highest archive
+        fetched = whisper.fetch(self.filename, 9, untilTime=29, now=29)
+        expected = ((10, 30, 1), list(range(10, 30)))
+        self.assertEqual(expected, fetched)
+
+        # test second archive
+        fetched = whisper.fetch(self.filename, 9, untilTime=29, now=30)
+        expected = ((10, 30, 5), [12.0, 17.0, 22.0, 27])
+        self.assertEqual(expected, fetched)
+
+        # test lowest archive
+        fetched = whisper.fetch(self.filename, 9, untilTime=29, now=200)
+        expected = ((10, 30, 10), [14.5, 24.5])
+        self.assertEqual(expected, fetched)
+
+    def test_update_many_multi_archives(self):
+        """
+        Update multi layer archive and verify data
+        """
+        self._create(self.filename, [(1, 20), (5, 20), (10, 20)])
+        test_data = [(t, t) for t in range(10, 30)]
+        whisper.update_many(self.filename, test_data, now=30)
+
+        # check highest archive
+        fetched = whisper.fetch(self.filename, 9, untilTime=29, now=29)
+        expected = ((10, 30, 1), list(range(10, 30)))
+        self.assertEqual(expected, fetched)
+
+        # test second archive
+        fetched = whisper.fetch(self.filename, 9, untilTime=29, now=30)
+        expected = ((10, 30, 5), [12.0, 17.0, 22.0, 27])
+        self.assertEqual(expected, fetched)
+
+        # test lowest archive
+        fetched = whisper.fetch(self.filename, 9, untilTime=29, now=200)
+        expected = ((10, 30, 10), [14.5, 24.5])
+        self.assertEqual(expected, fetched)
+
     def test_update_many_excess(self):
         # given an empty db
         wsp = "test_update_many_excess.wsp"
