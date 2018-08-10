@@ -807,7 +807,7 @@ points is a list of (timestamp,value) points
   if not points:
     return
   points = [(int(t), float(v)) for (t, v) in points]
-  points.sort(key=lambda p: p[0], reverse=True)  # Order points by timestamp, newest first
+  points.sort(key=lambda p: p[0])  # Order points by timestamp
   with open(path, 'r+b', BUFFERING) as fh:
     if CAN_FADVISE and FADVISE_RANDOM:
       posix_fadvise(fh.fileno(), 0, 0, POSIX_FADV_RANDOM)
@@ -825,7 +825,7 @@ def file_update_many(fh, points, now=None):
   currentArchive = next(archives)
   currentPoints = []
 
-  for point in points:
+  for point in reversed(points):
     age = now - point[0]
 
     while currentArchive['retention'] < age:  # We can't fit any more points in this archive

@@ -799,6 +799,45 @@ class TestWhisper:
         expected = ((10, 30, 10), [14.5, 24.5])
         self.assertEqual(expected, fetched)
 
+    def test_update_many_duplicate_points(self):
+        """
+        test update_many with exaclty duplicate timestamp in points
+        last point should be written
+        """
+        self._create(self.filename, [(1, 20)])
+        test_data = [(1, 1), (1, 2), (2, 2), (2, 1), (2, 3)]
+        whisper.update_many(self.filename, test_data, now=20)
+
+        fetched = whisper.fetch(self.filename, 0, untilTime=5, now=20)
+        expected = ((1, 6, 1), [2.0, 3.0, None, None, None])
+        self.assertEqual(expected, fetched)
+
+    def test_update_many_aligned_duplicate_points(self):
+        """
+        test update_many with duplicate timestamp after alignment
+        point with highest unaligned timestamp should be written
+        """
+        self._create(self.filename, [(10, 20)])
+        test_data = [(10, 1), (11, 2), (23, 12), (24, 13), (22, 11)]
+        whisper.update_many(self.filename, test_data, now=30)
+
+        fetched = whisper.fetch(self.filename, 0, untilTime=30, now=30)
+        expected = ((10, 40, 10), [2.0, 13.0, None])
+        self.assertEqual(expected, fetched)
+
+    def test_update_many_gaps_in_points(self):
+        """
+        test update_many with non-contiguous sequences
+        """
+        self._create(self.filename, [(1, 20)])
+        test_data = [(1, 1), (3, 3), (4, 4), (5, 5), (7, 7), (8, 8), (11, 11)]
+        whisper.update_many(self.filename, test_data, now=20)
+
+        fetched = whisper.fetch(self.filename, 0, untilTime=11, now=20)
+        expected = ((1, 12, 1),
+                    [1.0, None, 3.0, 4.0, 5.0, None, 7.0, 8.0, None, None, 11.0])
+        self.assertEqual(expected, fetched)
+
     def test_update_many_excess(self):
         # given an empty db
         wsp = "test_update_many_excess.wsp"
