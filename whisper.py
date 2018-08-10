@@ -282,7 +282,7 @@ def enableDebug():
     debug("%s took %.5f seconds" % (name, time.time() - __timingBlocks.pop(name)))
 
 
-def _calculateOffset(timestamp, archive):
+def __calculate_offset(timestamp, archive):
   """ Calculate the offset where timestamp is written in archive
 
   timestamp int from epoch
@@ -644,8 +644,8 @@ def __propagate(fh, header, timestamp, higher, lower):
 
   if header['version'] > 1:
     lowerIntervalEnd = lowerIntervalStart + lower['secondsPerPoint']
-    higherFirstOffset = _calculateOffset(lowerIntervalStart, higher)
-    higherLastOffset = _calculateOffset(lowerIntervalEnd, higher)
+    higherFirstOffset = __calculate_offset(lowerIntervalStart, higher)
+    higherLastOffset = __calculate_offset(lowerIntervalEnd, higher)
   else:
     fh.seek(higher['offset'])
     packedPoint = fh.read(pointSize)
@@ -700,25 +700,9 @@ def __propagate(fh, header, timestamp, higher, lower):
   knownPercent = float(len(knownValues)) / float(len(neighborValues))
   if knownPercent >= xff:  # We have enough data to propagate a value!
     aggregateValue = aggregate(aggregationMethod, knownValues, neighborValues)
-    myPackedPoint = struct.pack(pointFormat, lowerIntervalStart, aggregateValue)
 
-    if header['version'] > 1:
-      myOffset = _calculateOffset(lowerIntervalStart, lower)
-    else:
-      fh.seek(lower['offset'])
-      packedPoint = fh.read(pointSize)
-      (lowerBaseInterval, _) = struct.unpack(pointFormat, packedPoint)
-
-      if lowerBaseInterval == 0:  # First propagated update to this lower archive
-        myOffset = lower['offset']
-      else:  # Not our first propagated update to this lower archive
-        timeDistance = lowerIntervalStart - lowerBaseInterval
-        pointDistance = timeDistance // lower['secondsPerPoint']
-        byteDistance = pointDistance * pointSize
-        myOffset = lower['offset'] + (byteDistance % lower['size'])
-
-    fh.seek(myOffset)
-    fh.write(myPackedPoint)
+    __write_points(fh, lower, [(lowerIntervalStart, aggregateValue)],
+                   header['version'])
 
     return True
 
@@ -767,24 +751,8 @@ def file_update(fh, value, timestamp, now=None):
 
   # First we update the highest-precision archive
   myInterval = timestamp - (timestamp % archive['secondsPerPoint'])
-  myPackedPoint = struct.pack(pointFormat, myInterval, value)
-  if header['version'] > 1:
-    myOffset = _calculateOffset(myInterval, archive)
-  else:
-    fh.seek(archive['offset'])
-    packedPoint = fh.read(pointSize)
-    (baseInterval, _) = struct.unpack(pointFormat, packedPoint)
 
-    if baseInterval == 0:  # This file's first update
-      myOffset = archive['offset']
-    else:  # Not our first update
-      timeDistance = myInterval - baseInterval
-      pointDistance = timeDistance // archive['secondsPerPoint']
-      byteDistance = pointDistance * pointSize
-      myOffset = archive['offset'] + (byteDistance % archive['size'])
-
-  fh.seek(myOffset)
-  fh.write(myPackedPoint)
+  __write_points(fh, archive, [(myInterval, value)], header['version'])
 
   # Now we propagate the update to lower-precision archives
   higher = archive
@@ -796,6 +764,44 @@ def file_update(fh, value, timestamp, now=None):
   if AUTOFLUSH:
     fh.flush()
     os.fsync(fh.fileno())
+
+
+def __write_points(fh, archive, points, version):
+  """
+  Write datapoints to a specific archive
+
+  datapoints must be a list of contiguous datapoints
+  """
+  startTime = points[0][0]
+
+  packedPoints = b''
+  for t, v in points:
+    packedPoints += struct.pack(pointFormat, t, v)
+
+  if version > 1:
+    offset = __calculate_offset(startTime, archive)
+  else:
+    fh.seek(archive['offset'])
+    basePoint = fh.read(pointSize)
+    (baseInterval, _) = struct.unpack(pointFormat, basePoint)
+
+    if baseInterval == 0:  # This file's first update
+      offset = archive['offset']
+    else:  # Not our first update
+      offset = __calculate_offset(startTime - baseInterval, archive)
+
+  fh.seek(offset)
+
+  # check if we need to wrap
+  archiveEnd = archive['offset'] + archive['size']
+  bytesBeyond = (offset + len(packedPoints)) - archiveEnd
+
+  if bytesBeyond > 0:
+    fh.write(packedPoints[:-bytesBeyond])
+    fh.seek(archive['offset'])
+    fh.write(packedPoints[-bytesBeyond:])
+  else:
+    fh.write(packedPoints)
 
 
 def update_many(path, points, now=None):
@@ -859,63 +865,29 @@ def __archive_update_many(fh, header, archive, points):
   alignedPoints = [(timestamp - (timestamp % step), value)
                    for (timestamp, value) in points]
   # Create a packed string for each contiguous sequence of points
-  packedStrings = []
+  pointSequences = []
   previousInterval = None
-  currentString = b""
+  currentSequence = []
   lenAlignedPoints = len(alignedPoints)
+
   for i in xrange(0, lenAlignedPoints):
     # Take last point in run of points with duplicate intervals
     if i + 1 < lenAlignedPoints and alignedPoints[i][0] == alignedPoints[i + 1][0]:
       continue
     (interval, value) = alignedPoints[i]
     if (not previousInterval) or (interval == previousInterval + step):
-      currentString += struct.pack(pointFormat, interval, value)
+      currentSequence.append((interval, value))
       previousInterval = interval
     else:
-      numberOfPoints = len(currentString) // pointSize
-      startInterval = previousInterval - (step * (numberOfPoints - 1))
-      packedStrings.append((startInterval, currentString))
-      currentString = struct.pack(pointFormat, interval, value)
+      pointSequences.append(currentSequence)
+      currentSequence = []
+      currentSequence.append((interval, value))
       previousInterval = interval
-  if currentString:
-    numberOfPoints = len(currentString) // pointSize
-    startInterval = previousInterval - (step * (numberOfPoints - 1))
-    packedStrings.append((startInterval, currentString))
+  if currentSequence:
+    pointSequences.append(currentSequence)
 
-  if header['version'] == 1:
-    # Read base point and determine where our writes will start
-    fh.seek(archive['offset'])
-    packedBasePoint = fh.read(pointSize)
-    (baseInterval, _) = struct.unpack(pointFormat, packedBasePoint)
-    if baseInterval == 0:  # This file's first update
-      # Use our first string as the base, so we start at the start
-      baseInterval = packedStrings[0][0]
-
-  # Write all of our packed strings in locations determined by the baseInterval
-  for (interval, packedString) in packedStrings:
-    if header['version'] > 1:
-      myOffset = _calculateOffset(interval, archive)
-    else:
-      timeDistance = interval - baseInterval
-      pointDistance = timeDistance // step
-      byteDistance = pointDistance * pointSize
-      myOffset = archive['offset'] + (byteDistance % archive['size'])
-
-    fh.seek(myOffset)
-    archiveEnd = archive['offset'] + archive['size']
-    bytesBeyond = (myOffset + len(packedString)) - archiveEnd
-
-    if bytesBeyond > 0:
-      fh.write(packedString[:-bytesBeyond])
-      assert fh.tell() == archiveEnd, (
-        "archiveEnd=%d fh.tell=%d bytesBeyond=%d len(packedString)=%d" %
-        (archiveEnd, fh.tell(), bytesBeyond, len(packedString))
-      )
-      fh.seek(archive['offset'])
-      # Safe because it can't exceed the archive (retention checking logic above)
-      fh.write(packedString[-bytesBeyond:])
-    else:
-      fh.write(packedString)
+  for points in pointSequences:
+    __write_points(fh, archive, points, header['version'])
 
   # Now we propagate the updates to lower-precision archives
   higher = archive
@@ -1037,10 +1009,10 @@ archive on a read and request data older than the archive's retention
     # Zero-length time range: always include the next point
     untilInterval += step
 
-  if header['version'] > 1:
-    fromOffset = _calculateOffset(fromInterval, archive)
-    untilOffset = _calculateOffset(untilInterval, archive)
-  else:
+  # V2 does not care about the baseInterval
+  baseInterval = 0
+
+  if header['version'] == 1:
     fh.seek(archive['offset'])
     packedPoint = fh.read(pointSize)
     (baseInterval, _) = struct.unpack(pointFormat, packedPoint)
@@ -1051,17 +1023,8 @@ archive on a read and request data older than the archive's retention
       valueList = [None] * points
       return (timeInfo, valueList)
 
-    # Determine fromOffset
-    timeDistance = fromInterval - baseInterval
-    pointDistance = timeDistance // step
-    byteDistance = pointDistance * pointSize
-    fromOffset = archive['offset'] + (byteDistance % archive['size'])
-
-    # Determine untilOffset
-    timeDistance = untilInterval - baseInterval
-    pointDistance = timeDistance // step
-    byteDistance = pointDistance * pointSize
-    untilOffset = archive['offset'] + (byteDistance % archive['size'])
+  fromOffset = __calculate_offset(fromInterval - baseInterval, archive)
+  untilOffset = __calculate_offset(untilInterval - baseInterval, archive)
 
   # Read all the points in the interval
   fh.seek(fromOffset)
