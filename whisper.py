@@ -120,6 +120,8 @@ archiveInfoFormat = "!3L"
 archiveInfoSize = struct.calcsize(archiveInfoFormat)
 versionFormat = '!7s5s'
 versionSize = struct.calcsize(versionFormat)
+byteOrder = '!'
+pointTypes = 'Ld'
 
 aggregationTypeToMethod = dict({
   1: 'average',
@@ -676,7 +678,6 @@ def __propagate(fh, header, timestamp, higher, lower):
     seriesString += fh.read(higherLastOffset - higher['offset'])
 
   # Now we unpack the series data we just read
-  byteOrder, pointTypes = pointFormat[0], pointFormat[1:]
   points = len(seriesString) // pointSize
   seriesFormat = byteOrder + (pointTypes * points)
   unpackedSeries = struct.unpack(seriesFormat, seriesString)
