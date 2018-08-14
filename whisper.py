@@ -35,6 +35,8 @@ import struct
 import sys
 import time
 
+import mmap
+
 izip = getattr(itertools, 'izip', zip)
 ifilter = getattr(itertools, 'ifilter', filter)
 
@@ -221,7 +223,7 @@ class UnsupportedVersion(WhisperException):
 
 class CorruptWhisperFile(WhisperException):
 
-  def __init__(self, error, path):
+  def __init__(self, error, path=None):
     Exception.__init__(self, error)
     self.error = error
     self.path = path
@@ -297,68 +299,59 @@ def __calculate_offset(timestamp, archive):
   return archiveOffset * pointSize + archive['offset']
 
 
-def __readHeader(fh):
-  if CACHE_HEADERS:
-    info = __headerCache.get(fh.name)
-    if info:
-      return info
+def __readHeader(mm):
+  #if CACHE_HEADERS:
+  #  info = __headerCache.get(fh.name)
+  #  if info:
+  #    return info
 
-  originalOffset = fh.tell()
-  fh.seek(0)
-  packedVersion = fh.read(versionSize)
+  header = mm.read(4096)
 
   try:
-    (magic, version) = struct.unpack(versionFormat, packedVersion)
+    (magic, version, aggregationType, maxRetention, xff, archiveCount) \
+            = struct.unpack(b'!7s5s2LfL', header[:28])
   except (struct.error):
-    raise CorruptWhisperFile("Unable to read version info", fh.name)
+    raise CorruptWhisperFile("Unable to read header")
 
   if magic == b'WHISPER':
     try:
       version = int(version)
+      p = 28
     except ValueError:
-      raise CorruptWhisperFile("Unable to read version info", fh.name)
+      #raise CorruptWhisperFile("Unable to read version info", fh.name)
+      raise CorruptWhisperFile("Unable to read version info")
     if version > VERSION:
       raise UnsupportedVersion()
   else:
+    try:
+      (aggregationType, maxRetention, xff, archiveCount) \
+        = struct.unpack(metadataFormat, header[0:metadataSize])
+    except (struct.error, ValueError, TypeError):
+      raise CorruptWhisperFile("Unable to read header")
     version = 1
-    fh.seek(0)
-
-  packedMetadata = fh.read(metadataSize)
-
-  try:
-    (aggregationType, maxRetention, xff, archiveCount) \
-        = struct.unpack(metadataFormat, packedMetadata)
-  except (struct.error, ValueError, TypeError):
-    raise CorruptWhisperFile("Unable to read header", fh.name)
+    p = metadataSize
 
   try:
     aggregationTypeToMethod[aggregationType]
   except KeyError:
     raise CorruptWhisperFile(
-      "Unable to read header (invalid aggregationType)", fh.name)
+      "Unable to read header (invalid aggregationType)")
 
   if not 0 <= xff <= 1:
-    raise CorruptWhisperFile("Unable to read header (invalid xff)", fh.name)
+    raise CorruptWhisperFile("Unable to read header (invalid xff)")
 
-  archives = []
+  archives = [None]*archiveCount
 
-  for i in xrange(archiveCount):
-    packedArchiveInfo = fh.read(archiveInfoSize)
-    try:
-      (offset, secondsPerPoint, points) = struct.unpack(archiveInfoFormat, packedArchiveInfo)
-    except (struct.error, ValueError, TypeError):
-      raise CorruptWhisperFile("Unable to read archive%d metadata" % i, fh.name)
-
-    archiveInfo = {
-      'offset': offset,
-      'secondsPerPoint': secondsPerPoint,
-      'points': points,
-      'retention': secondsPerPoint * points,
-      'size': points * pointSize,
+  a = struct.unpack('!{}L'.format(3 * archiveCount), header[p:p+archiveCount * archiveInfoSize])
+  for i in xrange(0, archiveCount * 3, 3):
+    archives[i//3] = {
+      'offset': a[i],
+      'secondsPerPoint': a[i+1],
+      'points': a[i+2],
+      'retention': a[i+1] * a[i+2],
+      'size': a[i+1] * pointSize,
     }
-    archives.append(archiveInfo)
 
-  fh.seek(originalOffset)
   info = {
     'version': version,
     'aggregationMethod': aggregationTypeToMethod.get(aggregationType, 'average'),
@@ -366,8 +359,8 @@ def __readHeader(fh):
     'xFilesFactor': xff,
     'archives': archives,
   }
-  if CACHE_HEADERS:
-    __headerCache[fh.name] = info
+  #if CACHE_HEADERS:
+    #__headerCache[fh.name] = info
 
   return info
 
@@ -407,35 +400,68 @@ def setAggregationMethod(path, aggregationMethod, xFilesFactor=None):
 def __setAggregation(path, aggregationMethod=None, xFilesFactor=None):
   """ Set aggregationMethod and or xFilesFactor for file in path"""
 
-  with open(path, 'r+b', BUFFERING) as fh:
-    if LOCK:
-      fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+  fd = os.open(path, os.O_RDWR)
+  mm = mmap.mmap(fd, 0)
 
-    info = __readHeader(fh)
+  try:
+    info = __readHeader(mm)
+  except CorruptWhisperFile as exc:
+      exc.path = path
+      raise
 
-    if xFilesFactor is None:
-      xFilesFactor = info['xFilesFactor']
+  if xFilesFactor is None:
+    xFilesFactor = info['xFilesFactor']
 
-    if aggregationMethod is None:
-      aggregationMethod = info['aggregationMethod']
+  if aggregationMethod is None:
+    aggregationMethod = info['aggregationMethod']
 
-    __writeHeaderMetadata(fh, aggregationMethod, info['maxRetention'],
-                          xFilesFactor, len(info['archives']),
-                          version=info['version'])
+  #__writeHeaderMetadata(mm, aggregationMethod, info['maxRetention'],
+  mm.seek(0)
+  mm.write(__packHeaderMetadata(aggregationMethod, info['maxRetention'],
+                                xFilesFactor, len(info['archives']),
+                                version=info['version']))
 
-    if AUTOFLUSH:
-      fh.flush()
-      os.fsync(fh.fileno())
+  mm.close()
+  os.close(fd)
+  #if AUTOFLUSH:
+  #  fh.flush()
+  #  os.fsync(fh.fileno())
 
-    if CACHE_HEADERS and fh.name in __headerCache:
-      del __headerCache[fh.name]
+  #if CACHE_HEADERS and fh.name in __headerCache:
+  #  del __headerCache[fh.name]
 
   return (info['aggregationMethod'], info['xFilesFactor'])
 
+  #with open(path, 'r+b', BUFFERING) as fh:
+  #  if LOCK:
+  #    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
 
-def __writeHeaderMetadata(fh, aggregationMethod, maxRetention, xFilesFactor,
+  #  info = __readHeader(fh)
+
+  #  if xFilesFactor is None:
+  #    xFilesFactor = info['xFilesFactor']
+
+  #  if aggregationMethod is None:
+  #    aggregationMethod = info['aggregationMethod']
+
+  #  __writeHeaderMetadata(fh, aggregationMethod, info['maxRetention'],
+  #                        xFilesFactor, len(info['archives']),
+  #                        version=info['version'])
+
+  #  if AUTOFLUSH:
+  #    fh.flush()
+  #    os.fsync(fh.fileno())
+
+  #  if CACHE_HEADERS and fh.name in __headerCache:
+  #    del __headerCache[fh.name]
+
+  #return (info['aggregationMethod'], info['xFilesFactor'])
+
+
+#def __writeHeaderMetadata(fh, aggregationMethod, maxRetention, xFilesFactor,
+def __packHeaderMetadata(aggregationMethod, maxRetention, xFilesFactor,
                           archiveCount, version):
-  """ Writes header metadata to fh """
+  """ returns paked header metadata """
 
   try:
     aggregationType = aggregationMethodToType[aggregationMethod]
@@ -463,8 +489,9 @@ def __writeHeaderMetadata(fh, aggregationMethod, maxRetention, xFilesFactor,
   else:
     packedMetadata = struct.pack(metadataFormat, *metadata)
 
-  fh.seek(0)
-  fh.write(packedMetadata)
+  return packedMetadata
+  #fh.seek(0)
+  #fh.write(packedMetadata)
 
 
 def validateArchiveList(archiveList):
@@ -564,15 +591,17 @@ def create(path, archiveList, xFilesFactor=None, aggregationMethod=None,
 
   with open(path, 'wb', BUFFERING) as fh:
     try:
-      if LOCK:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+      #if LOCK:
+      #  fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
       if CAN_FADVISE and FADVISE_RANDOM:
         posix_fadvise(fh.fileno(), 0, 0, POSIX_FADV_RANDOM)
 
       oldest = max([secondsPerPoint * points for secondsPerPoint, points in archiveList])
 
-      __writeHeaderMetadata(fh, aggregationMethod, oldest, xFilesFactor,
-                            len(archiveList), version)
+      #__writeHeaderMetadata(fh, aggregationMethod, oldest, xFilesFactor,
+      #                      len(archiveList), version)
+      fh.write(__packHeaderMetadata(aggregationMethod, oldest,
+                                    xFilesFactor, len(archiveList), version))
 
       headerSize = metadataSize + (archiveInfoSize * len(archiveList))
       if version > 1:
@@ -601,9 +630,9 @@ def create(path, archiveList, xFilesFactor=None, aggregationMethod=None,
           remaining -= chunksize
         fh.write(zeroes[:remaining])
 
-      if AUTOFLUSH:
-        fh.flush()
-        os.fsync(fh.fileno())
+      #if AUTOFLUSH:
+      #  fh.flush()
+        #os.fsync(fh.fileno())
       # Explicitly close the file to catch IOError on close()
       fh.close()
     except IOError:
@@ -638,7 +667,7 @@ def aggregate(aggregationMethod, knownValues, neighborValues=None):
       "Unrecognized aggregation method %s" % aggregationMethod)
 
 
-def __propagate(fh, header, timestamp, higher, lower):
+def __propagate(mm, header, timestamp, higher, lower):
   aggregationMethod = header['aggregationMethod']
   xff = header['xFilesFactor']
 
@@ -649,8 +678,10 @@ def __propagate(fh, header, timestamp, higher, lower):
     higherFirstOffset = __calculate_offset(lowerIntervalStart, higher)
     higherLastOffset = __calculate_offset(lowerIntervalEnd, higher)
   else:
-    fh.seek(higher['offset'])
-    packedPoint = fh.read(pointSize)
+    #fh.seek(higher['offset'])
+    mm.seek(higher['offset'])
+    #packedPoint = fh.read(pointSize)
+    packedPoint = mm.read(pointSize)
     (higherBaseInterval, _) = struct.unpack(pointFormat, packedPoint)
 
     if higherBaseInterval == 0:
@@ -667,15 +698,20 @@ def __propagate(fh, header, timestamp, higher, lower):
     relativeLastOffset = (relativeFirstOffset + higherSize) % higher['size']
     higherLastOffset = relativeLastOffset + higher['offset']
 
-  fh.seek(higherFirstOffset)
+  #fh.seek(higherFirstOffset)
+  mm.seek(higherFirstOffset)
 
   if higherFirstOffset < higherLastOffset:  # We don't wrap the archive
-    seriesString = fh.read(higherLastOffset - higherFirstOffset)
+    #seriesString = fh.read(higherLastOffset - higherFirstOffset)
+    seriesString = mm.read(higherLastOffset - higherFirstOffset)
   else:  # We do wrap the archive
     higherEnd = higher['offset'] + higher['size']
-    seriesString = fh.read(higherEnd - higherFirstOffset)
-    fh.seek(higher['offset'])
-    seriesString += fh.read(higherLastOffset - higher['offset'])
+    #seriesString = fh.read(higherEnd - higherFirstOffset)
+    #fh.seek(higher['offset'])
+    #seriesString += fh.read(higherLastOffset - higher['offset'])
+    seriesString = mm.read(higherEnd - higherFirstOffset)
+    mm.seek(higher['offset'])
+    seriesString += mm.read(higherLastOffset - higher['offset'])
 
   # Now we unpack the series data we just read
   points = len(seriesString) // pointSize
@@ -684,6 +720,7 @@ def __propagate(fh, header, timestamp, higher, lower):
 
   # And finally we construct a list of values
   neighborValues = [None] * points
+
   currentInterval = lowerIntervalStart
   step = higher['secondsPerPoint']
 
@@ -702,7 +739,8 @@ def __propagate(fh, header, timestamp, higher, lower):
   if knownPercent >= xff:  # We have enough data to propagate a value!
     aggregateValue = aggregate(aggregationMethod, knownValues, neighborValues)
 
-    __write_points(fh, lower, [(lowerIntervalStart, aggregateValue)],
+    #__write_points(fh, lower, [(lowerIntervalStart, aggregateValue)],
+    __write_points(mm, lower, [(lowerIntervalStart, aggregateValue)],
                    header['version'])
 
     return True
@@ -720,17 +758,29 @@ def update(path, value, timestamp=None, now=None):
   timestamp is either an int or float
   """
   value = float(value)
-  with open(path, 'r+b', BUFFERING) as fh:
-    if CAN_FADVISE and FADVISE_RANDOM:
-      posix_fadvise(fh.fileno(), 0, 0, POSIX_FADV_RANDOM)
-    return file_update(fh, value, timestamp, now)
+  #with open(path, 'r+b', BUFFERING) as fh:
+  #  if CAN_FADVISE and FADVISE_RANDOM:
+  #    posix_fadvise(fh.fileno(), 0, 0, POSIX_FADV_RANDOM)
+  #  return file_update(fh, value, timestamp, now)
+
+  fd = os.open(path, os.O_RDWR)
+  mm = mmap.mmap(fd, 0)
+  try:
+    return file_update(mm, value, timestamp, now)
+  except CorruptWhisperFile as exc:
+    exc.path = path
+    raise
+  finally:
+    mm.close()
+    os.close(fd)
 
 
-def file_update(fh, value, timestamp, now=None):
-  if LOCK:
-    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+def file_update(mm, value, timestamp, now=None):
+  #if LOCK:
+  #  fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
 
-  header = __readHeader(fh)
+  #header = __readHeader(fh)
+  header = __readHeader(mm)
   if now is None:
     now = int(time.time())
   if timestamp is None:
@@ -753,27 +803,31 @@ def file_update(fh, value, timestamp, now=None):
   # First we update the highest-precision archive
   myInterval = timestamp - (timestamp % archive['secondsPerPoint'])
 
-  __write_points(fh, archive, [(myInterval, value)], header['version'])
+  #__write_points(fh, archive, [(myInterval, value)], header['version'])
+  __write_points(mm, archive, [(myInterval, value)], header['version'])
 
   # Now we propagate the update to lower-precision archives
   higher = archive
   for lower in lowerArchives:
-    if not __propagate(fh, header, myInterval, higher, lower):
+    #if not __propagate(fh, header, myInterval, higher, lower):
+    if not __propagate(mm, header, myInterval, higher, lower):
       break
     higher = lower
 
-  if AUTOFLUSH:
-    fh.flush()
-    os.fsync(fh.fileno())
+  #if AUTOFLUSH:
+  #  mm.flush()
+    #fh.flush()
+    #os.fsync(fh.fileno())
 
 
-def __write_points(fh, archive, points, version):
+def __write_points(mm, archive, points, version):
   """
   Write datapoints to a specific archive
 
   datapoints must be a list of contiguous datapoints
   """
   startTime = points[0][0]
+
 
   packedPoints = b''
   for t, v in points:
@@ -782,8 +836,10 @@ def __write_points(fh, archive, points, version):
   if version > 1:
     offset = __calculate_offset(startTime, archive)
   else:
-    fh.seek(archive['offset'])
-    basePoint = fh.read(pointSize)
+    #fh.seek(archive['offset'])
+    mm.seek(archive['offset'])
+    #basePoint = fh.read(pointSize)
+    basePoint = mm.read(pointSize)
     (baseInterval, _) = struct.unpack(pointFormat, basePoint)
 
     if baseInterval == 0:  # This file's first update
@@ -791,41 +847,57 @@ def __write_points(fh, archive, points, version):
     else:  # Not our first update
       offset = __calculate_offset(startTime - baseInterval, archive)
 
-  fh.seek(offset)
+  #fh.seek(offset)
+  mm.seek(offset)
 
   # check if we need to wrap
   archiveEnd = archive['offset'] + archive['size']
   bytesBeyond = (offset + len(packedPoints)) - archiveEnd
 
   if bytesBeyond > 0:
-    fh.write(packedPoints[:-bytesBeyond])
-    fh.seek(archive['offset'])
-    fh.write(packedPoints[-bytesBeyond:])
+    #fh.write(packedPoints[:-bytesBeyond])
+    #fh.seek(archive['offset'])
+    #fh.write(packedPoints[-bytesBeyond:])
+    mm.write(packedPoints[:-bytesBeyond])
+    mm.seek(archive['offset'])
+    mm.write(packedPoints[-bytesBeyond:])
   else:
-    fh.write(packedPoints)
+    #fh.write(packedPoints)
+    mm.write(packedPoints)
 
 
 def update_many(path, points, now=None):
   """update_many(path,points)
 
-path is a string
-points is a list of (timestamp,value) points
-"""
+  path is a string
+  points is a list of (timestamp,value) points
+  """
   if not points:
     return
   points = [(int(t), float(v)) for (t, v) in points]
   points.sort(key=lambda p: p[0])  # Order points by timestamp
-  with open(path, 'r+b', BUFFERING) as fh:
-    if CAN_FADVISE and FADVISE_RANDOM:
-      posix_fadvise(fh.fileno(), 0, 0, POSIX_FADV_RANDOM)
-    return file_update_many(fh, points, now)
+  #with open(path, 'r+b', BUFFERING) as fh:
+  #  if CAN_FADVISE and FADVISE_RANDOM:
+  #    posix_fadvise(fh.fileno(), 0, 0, POSIX_FADV_RANDOM)
+  #  return file_update_many(fh, points, now)
+
+  fd = os.open(path, os.O_RDWR)
+  mm = mmap.mmap(fd, 0)
+  try:
+    return file_update_many(mm, points, now)
+  except CorruptWhisperFile as exc:
+    exc.path = path
+    raise
+  finally:
+    mm.close()
+    os.close(fd)
 
 
-def file_update_many(fh, points, now=None):
-  if LOCK:
-    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+def file_update_many(mm, points, now=None):
+  #if LOCK:
+  #  fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
 
-  header = __readHeader(fh)
+  header = __readHeader(mm)
   if now is None:
     now = int(time.time())
   archives = iter(header['archives'])
@@ -838,7 +910,7 @@ def file_update_many(fh, points, now=None):
     while currentArchive['retention'] < age:  # We can't fit any more points in this archive
       if currentPoints:  # Commit all the points we've found that it can fit
         currentPoints.reverse()  # Put points in chronological order
-        __archive_update_many(fh, header, currentArchive, currentPoints)
+        __archive_update_many(mm, header, currentArchive, currentPoints)
         currentPoints = []
       try:
         currentArchive = next(archives)
@@ -854,14 +926,14 @@ def file_update_many(fh, points, now=None):
   # Don't forget to commit after we've checked all the archives
   if currentArchive and currentPoints:
     currentPoints.reverse()
-    __archive_update_many(fh, header, currentArchive, currentPoints)
+    __archive_update_many(mm, header, currentArchive, currentPoints)
 
-  if AUTOFLUSH:
-    fh.flush()
-    os.fsync(fh.fileno())
+  #if AUTOFLUSH:
+  #  fh.flush()
+  #  os.fsync(fh.fileno())
 
 
-def __archive_update_many(fh, header, archive, points):
+def __archive_update_many(mm, header, archive, points):
   step = archive['secondsPerPoint']
   alignedPoints = [(timestamp - (timestamp % step), value)
                    for (timestamp, value) in points]
@@ -888,7 +960,7 @@ def __archive_update_many(fh, header, archive, points):
     pointSequences.append(currentSequence)
 
   for points in pointSequences:
-    __write_points(fh, archive, points, header['version'])
+    __write_points(mm, archive, points, header['version'])
 
   # Now we propagate the updates to lower-precision archives
   higher = archive
@@ -902,7 +974,7 @@ def __archive_update_many(fh, header, archive, points):
     uniqueLowerIntervals = set(lowerIntervals)
     propagateFurther = False
     for interval in uniqueLowerIntervals:
-      if __propagate(fh, header, interval, higher, lower):
+      if __propagate(mm, header, interval, higher, lower):
         propagateFurther = True
 
     if not propagateFurther:
@@ -916,12 +988,25 @@ def info(path):
 
   path is a string
   """
+  #try:
+  #  with open(path, 'rb') as fh:
+  #    return __readHeader(fh)
+  #except (IOError, OSError):
+  #  pass
+  #return None
   try:
-    with open(path, 'rb') as fh:
-      return __readHeader(fh)
+    fd = os.open(path, os.O_RDONLY)
+    mm = mmap.mmap(fd, 0, prot=mmap.PROT_READ)
+    return __readHeader(mm)
+  except CorruptWhisperFile as exc:
+    exc.path = path
+    raise
   except (IOError, OSError):
     pass
-  return None
+  else:
+    mm.close()
+    os.close(fd)
+
 
 
 def fetch(path, fromTime, untilTime=None, now=None, archiveToSelect=None):
