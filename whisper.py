@@ -643,57 +643,15 @@ def __propagate(fh, header, timestamp, higher, lower):
   xff = header['xFilesFactor']
 
   lowerIntervalStart = timestamp - (timestamp % lower['secondsPerPoint'])
+  lowerIntervalEnd = lowerIntervalStart + lower['secondsPerPoint']
 
-  if header['version'] > 1:
-    lowerIntervalEnd = lowerIntervalStart + lower['secondsPerPoint']
-    higherFirstOffset = __calculate_offset(lowerIntervalStart, higher)
-    higherLastOffset = __calculate_offset(lowerIntervalEnd, higher)
-  else:
-    fh.seek(higher['offset'])
-    packedPoint = fh.read(pointSize)
-    (higherBaseInterval, _) = struct.unpack(pointFormat, packedPoint)
+  # Need to substract the intervals by one as archive_fetch does from excluding
+  # the first value
+  neighborValues = __archive_fetch(fh, header, higher, lowerIntervalStart - 1,
+                                   lowerIntervalEnd - 1)[1]
 
-    if higherBaseInterval == 0:
-      higherFirstOffset = higher['offset']
-    else:
-      timeDistance = lowerIntervalStart - higherBaseInterval
-      pointDistance = timeDistance // higher['secondsPerPoint']
-      byteDistance = pointDistance * pointSize
-      higherFirstOffset = higher['offset'] + (byteDistance % higher['size'])
-
-    higherPoints = lower['secondsPerPoint'] // higher['secondsPerPoint']
-    higherSize = higherPoints * pointSize
-    relativeFirstOffset = higherFirstOffset - higher['offset']
-    relativeLastOffset = (relativeFirstOffset + higherSize) % higher['size']
-    higherLastOffset = relativeLastOffset + higher['offset']
-
-  fh.seek(higherFirstOffset)
-
-  if higherFirstOffset < higherLastOffset:  # We don't wrap the archive
-    seriesString = fh.read(higherLastOffset - higherFirstOffset)
-  else:  # We do wrap the archive
-    higherEnd = higher['offset'] + higher['size']
-    seriesString = fh.read(higherEnd - higherFirstOffset)
-    fh.seek(higher['offset'])
-    seriesString += fh.read(higherLastOffset - higher['offset'])
-
-  # Now we unpack the series data we just read
-  points = len(seriesString) // pointSize
-  seriesFormat = byteOrder + (pointTypes * points)
-  unpackedSeries = struct.unpack(seriesFormat, seriesString)
-
-  # And finally we construct a list of values
-  neighborValues = [None] * points
-  currentInterval = lowerIntervalStart
-  step = higher['secondsPerPoint']
-
-  for i in xrange(0, len(unpackedSeries), 2):
-    pointTime = unpackedSeries[i]
-    if pointTime == currentInterval:
-      neighborValues[i // 2] = unpackedSeries[i + 1]
-    currentInterval += step
-
-  # Propagate aggregateValue to propagate from neighborValues if we have enough known points
+  # Propagate aggregateValue to propagate from neighborValues if we have enough
+  # known points
   knownValues = [v for v in neighborValues if v is not None]
   if not knownValues:
     return False
@@ -996,14 +954,13 @@ def file_fetch(fh, fromTime, untilTime, now=None, archiveToSelect=None):
 
 def __archive_fetch(fh, header, archive, fromTime, untilTime):
   """
-Fetch data from a single archive. Note that checks for validity of the time
-period requested happen above this level so it's possible to wrap around the
-archive on a read and request data older than the archive's retention
-"""
+  Fetch data from a single archive. Note that checks for validity of the time
+  period requested happen above this level so it's possible to wrap around the
+  archive on a read and request data older than the archive's retention
+  """
   step = archive['secondsPerPoint']
 
   fromInterval = int(fromTime - (fromTime % step)) + step
-
   untilInterval = int(untilTime - (untilTime % step)) + step
 
   if fromInterval == untilInterval:
@@ -1038,7 +995,6 @@ archive on a read and request data older than the archive's retention
     seriesString += fh.read(untilOffset - archive['offset'])
 
   # Now we unpack the series data we just read (anything faster than unpack?)
-  byteOrder, pointTypes = pointFormat[0], pointFormat[1:]
   points = len(seriesString) // pointSize
   seriesFormat = byteOrder + (pointTypes * points)
   unpackedSeries = struct.unpack(seriesFormat, seriesString)
